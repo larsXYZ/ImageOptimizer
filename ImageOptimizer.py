@@ -49,6 +49,9 @@ def perform_random_operation(image):
 
     return new_image, operation
 
+running_average_length = 100
+successes = [False] * running_average_length
+
 N = 10000000000
 for i in range(N):
 
@@ -60,8 +63,22 @@ for i in range(N):
     if new_error < current_error:
         updated = True
         current_image = new_image
+        successes.append(True)
+        successes.pop(0)
 
-    print("{:<6}, {:<10} : {:<12} {}/{}".format(str(new_error < current_error), new_error, operation[:19], i, N))
+    else:
+        successes.append(False)
+        successes.pop(0)
+
+    counter = 0
+
+    for x in successes:
+        if x:
+            counter += 1
+
+    running_average = counter / running_average_length
+
+    print("{:<6}, {:<7}, {:<10} : {:<12} {}/{}".format(str(new_error < current_error), round(running_average, 4), new_error, operation[:19], i, N))
 
     if i % 10 == 0 and updated:
         plt.imsave("generated_images\web_image.png", arr=current_image)
