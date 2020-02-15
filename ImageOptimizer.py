@@ -43,24 +43,29 @@ def perform_random_operation(image):
                     new_image[x, y] = color[np.newaxis, np.newaxis, :]
     elif operation == 'GaussBlur':
         sigma = np.random.randint(0, 10)
-        new_image = gaussian_filter(new_image, sigma=sigma)
+        new_image[:, :, 0] = gaussian_filter(new_image[:, :, 0], sigma=sigma)
+        new_image[:, :, 1] = gaussian_filter(new_image[:, :, 1], sigma=sigma)
+        new_image[:, :, 2] = gaussian_filter(new_image[:, :, 2], sigma=sigma)
 
     return new_image, operation
 
-N = 100000000
+N = 10000000000
 for i in range(N):
 
     current_error = measure_error(target_image, current_image)
     new_image, operation = perform_random_operation(current_image)
     new_error = measure_error(target_image, new_image)
 
+    updated = False
     if new_error < current_error:
+        updated = True
         current_image = new_image
 
     print("{:<6}, {:<10} : {:<12} {}/{}".format(str(new_error < current_error), new_error, operation[:19], i, N))
 
-    if i % 10 == 0:
+    if i % 10 == 0 and updated:
         plt.imsave("generated_images\web_image.png", arr=current_image)
+        updated = False
 
     if i % 100 == 0:
         plt.imsave("generated_images\IM_{}.png".format(i), arr=current_image)
