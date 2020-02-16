@@ -30,7 +30,7 @@ class ImageOptimizer:
             return image
 
     def measure_error(self, image):
-        return np.sum(np.linalg.norm(self.target_image-image))
+        return np.sum(np.abs(self.target_image-image))
 
 
     def perform_random_operation(self, image):
