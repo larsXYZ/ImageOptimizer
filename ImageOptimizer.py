@@ -3,11 +3,12 @@ import matplotlib.pyplot as plt
 from collections import OrderedDict
 import numpy as np
 import imageio
+import os
 
 
 class ImageOptimizer:
 
-    def __init__(self, target_image_path, seed_image_path=None):
+    def __init__(self, target_image_path, seed_image_path=None, project_name=None):
 
         #Loading images
         self.target_image = imageio.imread(target_image_path).astype('int')
@@ -20,18 +21,40 @@ class ImageOptimizer:
         assert self.current_image.shape == self.target_image.shape, "Images must have the same dimensions"
 
         #Folder setup
+        if project_name is None:
+            import time
+            self.project_name = "Project - {}/".format(int(time.time()))
+        else:
+            if project_name[-1] == r"\\" or project_name[-1] == r"/":
+                self.project_name = project_name
+            else:
+                self.project_name = project_name + r"/"
         self.backup_folder = "generated_images/"
+        if not os.path.exists(self.backup_folder+self.project_name):
+            os.makedirs(self.backup_folder+self.project_name)
 
         #Supported operations
         self.supported_operations = ['Square', 'Circle', 'GaussBlur']
 
-        #Running average success rate estimation
+        #Running average success rate estimation for the supported operations
         self.running_average_length = 200
         self.successes = OrderedDict()
         self.success_rates = OrderedDict()
         for operation in self.supported_operations:
             self.successes[operation] = [True] * self.running_average_length
             self.success_rates[operation] = 1 / len(self.supported_operations)
+
+        #Keeping track of which colors are the most successful
+        self.color_scores = 10 * np.ones(shape=(256, 3))
+        self.color_scores_normalization_rate = 0.99
+        self.color_scores_sigma = 10
+        self.color_increase_rate = 4
+
+        #Keeping track of which positions are the most successful
+        self.position_scores = 10 * np.ones(shape=self.target_image.shape[0:2])
+        self.position_scores_normalization_rate = 0.999
+        self.position_scores_sigma = 30
+        self.position_increase_rate = 100
 
     def make_image_rgb(self, image):
 
@@ -45,19 +68,79 @@ class ImageOptimizer:
     def measure_error(self, image):
         return np.sum(np.abs(self.target_image-image))
 
+    def generate_color_sampling_probs(self):
+        r_scores_norm = np.exp(self.color_scores[:, 0]) / np.sum(np.exp(self.color_scores[:, 0]))
+        g_scores_norm = np.exp(self.color_scores[:, 1]) / np.sum(np.exp(self.color_scores[:, 1]))
+        b_scores_norm = np.exp(self.color_scores[:, 2]) / np.sum(np.exp(self.color_scores[:, 2]))
+
+        return r_scores_norm, g_scores_norm, b_scores_norm
+
+    def generate_center_sampling_probs(self):
+        return np.exp(self.position_scores) / np.sum(np.exp(self.position_scores))
+
+    def update_color_scores(self, color, mean_improvement):
+        [r, g, b] = color[..., :]
+
+        # Updating color scores
+        self.color_scores[int(r), 0] += self.color_increase_rate * (1 + mean_improvement)
+        self.color_scores[int(g), 1] += self.color_increase_rate * (1 + mean_improvement)
+        self.color_scores[int(b), 2] += self.color_increase_rate * (1 + mean_improvement)
+
+        # Normalizing error with a gaussian blur and proportional reductions
+        self.color_scores[:, 0] = gaussian_filter(self.color_scores[:, 0], sigma=self.color_scores_sigma)
+        self.color_scores[:, 1] = gaussian_filter(self.color_scores[:, 1], sigma=self.color_scores_sigma)
+        self.color_scores[:, 2] = gaussian_filter(self.color_scores[:, 2], sigma=self.color_scores_sigma)
+        self.color_scores *= self.color_scores_normalization_rate
+
+    def update_position_scores(self, center, mean_improvement):
+        [x, y] = center
+
+        # Updating position scores
+        self.position_scores[x, y] += self.position_increase_rate * (1 + mean_improvement)
+
+        # Normalizing error with a gaussian blur and proportional reductions
+        self.position_scores = gaussian_filter(self.position_scores, sigma=self.position_scores_sigma)
+        self.position_scores *= self.position_scores_normalization_rate
+
+    def sample_operation(self):
+        success_rates_norm = np.array([success_rate for success_rate in self.success_rates.values()])
+        success_rates_norm = np.exp(success_rates_norm) / np.sum(np.exp(success_rates_norm))
+        return np.random.choice(self.supported_operations, p=success_rates_norm)
+
+    def sample_color(self):
+
+        r_probs, g_probs, b_probs = self.generate_color_sampling_probs()
+
+        r = np.random.choice(range(0, 256), p=r_probs)
+        g = np.random.choice(range(0, 256), p=g_probs)
+        b = np.random.choice(range(0, 256), p=b_probs)
+        return np.array([r, g, b])
+
+    def sample_position(self):
+
+        pos_probs = self.generate_center_sampling_probs()
+
+        [im_x_size, im_y_size, _] = self.target_image.shape
+
+        x = np.random.choice(range(0, im_x_size), p=np.sum(pos_probs, axis=1, keepdims=False))
+        y = np.random.choice(range(0, im_y_size), p=pos_probs[x, :]/np.sum(pos_probs[x, :]))
+
+        return x, y
+
+
     def perform_random_operation(self, image):
 
         new_image = image.copy()
-        success_rates_norm = np.array([ success_rate + 0.01 for success_rate in self.success_rates.values()])
-        success_rates_norm = success_rates_norm / np.sum(success_rates_norm)
-        operation = np.random.choice(self.supported_operations, p=success_rates_norm )
+
         [im_x_size, im_y_size, _] = image.shape
+        operation = self.sample_operation()
+        color =  None
+        x0, y0 = None, None
 
         if operation == 'Square':
 
             #Sampling center location
-            x0 = np.random.randint(0, im_x_size)
-            y0 = np.random.randint(0, im_y_size)
+            x0, y0 = self.sample_position()
 
             #Sampling size
             x_size = np.random.randint(0, 1+min(x0, max(im_x_size - x0, 0)))
@@ -68,7 +151,7 @@ class ImageOptimizer:
             y_min, y_max = max(y0 - y_size, 0), min(im_y_size - 1, y0 + y_size)
 
             #Sampling color
-            color = np.random.randint(0, 255, size=3)
+            color = self.sample_color()
 
             #Creating new image
             new_image[x_min:x_max, y_min:y_max, :] = color[np.newaxis, np.newaxis, :]
@@ -76,12 +159,22 @@ class ImageOptimizer:
         elif operation == 'Circle':
 
             #Sampling center location
-            x0 = np.random.randint(1, im_x_size-1)
-            y0 = np.random.randint(1, im_y_size-1)
+            x0, y0 = self.sample_position()
+
+            #Circles should not be along the edge of images
+            if x0 == im_x_size:
+                x0 -= 1
+            elif x0 == 0:
+                x0 += 1
+
+            if y0 == im_y_size:
+                y0 -= 1
+            elif y0 == 0:
+                y0 += 1
 
             #Sampling radius and color
             radius = np.random.randint(0, min(x0, y0, im_x_size - x0, im_y_size - y0))
-            color = np.random.randint(0, 255, size=3)
+            color = self.sample_color()
 
             #Creating new image
             for x in range(x0-radius, x0+radius+1):
@@ -99,7 +192,7 @@ class ImageOptimizer:
             new_image[:, :, 1] = gaussian_filter(new_image[:, :, 1], sigma=sigma)
             new_image[:, :, 2] = gaussian_filter(new_image[:, :, 2], sigma=sigma)
 
-        return new_image, operation
+        return new_image, operation, color, (x0, y0)
 
     def estimate_target_image(self, N=10000000000, backup_freq=100, web_image_freq=10):
 
@@ -111,15 +204,35 @@ class ImageOptimizer:
             current_error = self.measure_error(self.current_image)
 
             #Performing random operation and calculating new error
-            new_image, operation = self.perform_random_operation(self.current_image)
+            new_image, operation, color, center = self.perform_random_operation(self.current_image)
             new_error = self.measure_error(new_image)
+            success = new_error < current_error
 
             #Replace current image if the error is reduced
-            if new_error < current_error:
+            if success:
+
+                #The backup and web images should be updated
                 web_updated, backup_updated = True, True
+
+                #Replace image
                 self.current_image = new_image
+
+                #Count success
                 self.successes[operation].append(True)
                 self.successes[operation].pop(0)
+
+                # How big was the success? Use the mean pixel improvement as a measure for this
+                [im_x_size, im_y_size, n_channels] = self.target_image.shape
+                mean_improvement = abs(current_error - new_error) / (im_x_size * im_y_size * n_channels)
+
+                #If a color was used keep track of it
+                if color is not None:
+                    self.update_color_scores(color, mean_improvement)
+
+                #If a center position was used keep track of it
+                if center[0] is not None and center[1] is not None:
+                    self.update_position_scores(center, mean_improvement)
+
             else:
                 self.successes[operation].append(False)
                 self.successes[operation].pop(0)
@@ -129,15 +242,42 @@ class ImageOptimizer:
             self.success_rates[operation] = success_count / self.running_average_length
 
             #Printing information
-            print("{}/{}: {:<12}, {:<6}, {:<4} : {:<12}".format(i, N, operation[:19], str(new_error < current_error),
+            print("{}/{}: {:<12}, {:<6}, {:<4} : {:<12}".format(i, N, operation[:19], str(success),
                                                                 round(self.success_rates[operation], 2), int(new_error)))
 
             #Updating web file
             if i % web_image_freq == 0 and web_updated:
                 plt.imsave(self.backup_folder+"web_image.png", arr=self.current_image.astype('uint8'))
+
+                plt.clf()
+                r_probs, g_probs, b_probs = self.generate_color_sampling_probs()
+                plt.plot(np.arange(0, 256), r_probs, color='r')
+                plt.plot(np.arange(0, 256), g_probs, color='g')
+                plt.plot(np.arange(0, 256), b_probs, color='b')
+                plt.ylim(ymin=0)
+                plt.grid()
+                plt.title("RGB sampling preferences")
+                plt.savefig(self.backup_folder+"web_rgb.png")
+
+                plt.imsave(self.backup_folder+"web_center.png", arr=self.generate_center_sampling_probs())
+
                 web_updated = False
 
             #Updating backup
             if i % backup_freq == 0 and backup_updated:
-                plt.imsave(self.backup_folder+"IM_{}.png".format(i), arr=self.current_image.astype('uint8'))
+                plt.imsave(self.backup_folder+self.project_name+"IM_{}.png".format(i),
+                           arr=self.current_image.astype('uint8'))
+
+
+                plt.clf()
+                r_probs, g_probs, b_probs = self.generate_color_sampling_probs()
+                plt.plot(np.arange(0, 256), r_probs, color='r')
+                plt.plot(np.arange(0, 256), g_probs, color='g')
+                plt.plot(np.arange(0, 256), b_probs, color='b')
+                plt.ylim(ymin=0)
+                plt.grid()
+                plt.savefig(self.backup_folder+self.project_name+"RGB_{}.png".format(i))
+
+                plt.imsave(self.backup_folder + self.project_name + "CENTER_{}.png".format(i), arr=self.generate_center_sampling_probs())
+
                 backup_updated = False
