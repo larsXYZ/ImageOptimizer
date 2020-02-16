@@ -125,9 +125,8 @@ class ImageOptimizer:
                 self.successes[operation].pop(0)
 
             #Estimating success rates
-            for operation in self.supported_operations:
-                success_count = sum([int(x) for x in self.successes[operation]])
-                self.success_rates[operation] = success_count / self.running_average_length
+            success_count = sum([int(x) for x in self.successes[operation]])
+            self.success_rates[operation] = success_count / self.running_average_length
 
             #Printing information
             print("{}/{}: {:<12}, {:<6}, {:<4} : {:<12}".format(i, N, operation[:19], str(new_error < current_error),
