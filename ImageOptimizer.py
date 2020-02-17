@@ -5,6 +5,8 @@ import numpy as np
 import imageio
 import os
 
+from pylab import *
+from mpl_toolkits.mplot3d import Axes3D
 
 class ImageOptimizer:
 
@@ -45,16 +47,18 @@ class ImageOptimizer:
             self.success_rates[operation] = 1 / len(self.supported_operations)
 
         #Keeping track of which colors are the most successful
-        self.color_scores = 10 * np.ones(shape=(256, 3))
+        self.n_color_bins = 32
+        assert 256 % self.n_color_bins == 0, "256 must be evenly divisible by number of color bins"
+        self.color_scores_binned = 10 * np.ones(shape=(self.n_color_bins, self.n_color_bins, self.n_color_bins))
         self.color_scores_normalization_rate = 0.99
-        self.color_scores_sigma = 10
-        self.color_increase_rate = 4
+        self.color_score_blur_window_size = 7
+        self.color_increase_rate = 10
 
         #Keeping track of which positions are the most successful
         self.position_scores = 10 * np.ones(shape=self.target_image.shape[0:2])
-        self.position_scores_normalization_rate = 0.999
-        self.position_scores_sigma = 30
-        self.position_increase_rate = 100
+        self.position_scores_normalization_rate = 0.99
+        self.position_scores_sigma = 50
+        self.position_increase_rate = 30
 
     def make_image_rgb(self, image):
 
@@ -68,12 +72,15 @@ class ImageOptimizer:
     def measure_error(self, image):
         return np.sum(np.abs(self.target_image-image))
 
-    def generate_color_sampling_probs(self):
-        r_scores_norm = np.exp(self.color_scores[:, 0]) / np.sum(np.exp(self.color_scores[:, 0]))
-        g_scores_norm = np.exp(self.color_scores[:, 1]) / np.sum(np.exp(self.color_scores[:, 1]))
-        b_scores_norm = np.exp(self.color_scores[:, 2]) / np.sum(np.exp(self.color_scores[:, 2]))
+    def generate_color_sampling_probs_binned(self):
+        return np.exp(self.color_scores_binned) / np.sum(np.exp(self.color_scores_binned))
 
-        return r_scores_norm, g_scores_norm, b_scores_norm
+    def generate_marginal_color_probs_binned(self):
+        color_probs_binned = self.generate_color_sampling_probs_binned()
+        r_probs = np.squeeze(np.sum( np.sum(color_probs_binned, axis=1, keepdims=True), axis=2, keepdims=True))
+        g_probs = np.squeeze(np.sum( np.sum(color_probs_binned, axis=0, keepdims=True), axis=2, keepdims=True))
+        b_probs = np.squeeze(np.sum( np.sum(color_probs_binned, axis=0, keepdims=True), axis=1, keepdims=True))
+        return r_probs, g_probs, b_probs
 
     def generate_center_sampling_probs(self):
         return np.exp(self.position_scores) / np.sum(np.exp(self.position_scores))
@@ -81,16 +88,32 @@ class ImageOptimizer:
     def update_color_scores(self, color, mean_improvement):
         [r, g, b] = color[..., :]
 
-        # Updating color scores
-        self.color_scores[int(r), 0] += self.color_increase_rate * (1 + mean_improvement)
-        self.color_scores[int(g), 1] += self.color_increase_rate * (1 + mean_improvement)
-        self.color_scores[int(b), 2] += self.color_increase_rate * (1 + mean_improvement)
+        def find_correct_color_bin(r, g, b, n_bins):
+            return int(r/256*n_bins), int(g/256*n_bins), int(b/256*n_bins)
 
-        # Normalizing error with a gaussian blur and proportional reductions
-        self.color_scores[:, 0] = gaussian_filter(self.color_scores[:, 0], sigma=self.color_scores_sigma)
-        self.color_scores[:, 1] = gaussian_filter(self.color_scores[:, 1], sigma=self.color_scores_sigma)
-        self.color_scores[:, 2] = gaussian_filter(self.color_scores[:, 2], sigma=self.color_scores_sigma)
-        self.color_scores *= self.color_scores_normalization_rate
+        ri, gi, bi = find_correct_color_bin(r, g, b, self.n_color_bins)
+
+        # Updating color scores
+        self.color_scores_binned[ri, gi, bi] += self.color_increase_rate * (1 + mean_improvement)
+
+        # Normalizing error with a moving box filter
+        window_size_half = int(self.color_score_blur_window_size/2)
+        new_scores = self.color_scores_binned.copy()
+        for ri in range(0, self.n_color_bins):
+            for gi in range(0, self.n_color_bins):
+                for bi in range(0, self.n_color_bins):
+
+                    r_min, r_max = max(0, ri - window_size_half), min(self.n_color_bins, ri + window_size_half)
+                    g_min, g_max = max(0, gi - window_size_half), min(self.n_color_bins, gi + window_size_half)
+                    b_min, b_max = max(0, bi - window_size_half), min(self.n_color_bins, bi + window_size_half)
+
+                    new_scores[ri, gi, bi] = np.mean(
+                        self.color_scores_binned[r_min:r_max,
+                                                 g_min:g_max,
+                                                 b_min:b_max])
+
+        self.color_scores_binned = new_scores.copy()
+        self.color_scores_binned *= self.color_scores_normalization_rate
 
     def update_position_scores(self, center, mean_improvement):
         [x, y] = center
@@ -109,12 +132,23 @@ class ImageOptimizer:
 
     def sample_color(self):
 
-        r_probs, g_probs, b_probs = self.generate_color_sampling_probs()
+        color_probs = self.generate_color_sampling_probs_binned()
 
-        r = np.random.choice(range(0, 256), p=r_probs)
-        g = np.random.choice(range(0, 256), p=g_probs)
-        b = np.random.choice(range(0, 256), p=b_probs)
-        return np.array([r, g, b])
+        r_probs = np.sum(np.sum(color_probs, axis=2, keepdims=False), axis=1, keepdims=False)
+        r = np.random.choice(range(0, self.n_color_bins), p=r_probs)
+
+        g_probs = np.sum(color_probs[r, :, :], axis=1, keepdims=False)
+        g = np.random.choice(range(0, self.n_color_bins), p=g_probs/np.sum(g_probs))
+
+        b_probs = color_probs[r, g, :]
+        b = np.random.choice(range(0, self.n_color_bins), p=b_probs/np.sum(b_probs))
+
+        n_val_per_bin = 256 / self.n_color_bins
+        r = r * n_val_per_bin + np.random.randint(0, n_val_per_bin)
+        g = g * n_val_per_bin + np.random.randint(0, n_val_per_bin)
+        b = b * n_val_per_bin + np.random.randint(0, n_val_per_bin)
+
+        return np.array([int(r), int(g), int(b)])
 
     def sample_position(self):
 
@@ -250,11 +284,10 @@ class ImageOptimizer:
                 plt.imsave(self.backup_folder+"web_image.png", arr=self.current_image.astype('uint8'))
 
                 plt.clf()
-                r_probs, g_probs, b_probs = self.generate_color_sampling_probs()
-                plt.plot(np.arange(0, 256), r_probs, color='r')
-                plt.plot(np.arange(0, 256), g_probs, color='g')
-                plt.plot(np.arange(0, 256), b_probs, color='b')
-                plt.ylim(ymin=0)
+                r_probs, g_probs, b_probs = self.generate_marginal_color_probs_binned()
+                plt.plot(np.arange(0, 32), r_probs, color='r')
+                plt.plot(np.arange(0, 32), g_probs, color='g')
+                plt.plot(np.arange(0, 32), b_probs, color='b')
                 plt.grid()
                 plt.title("RGB sampling preferences")
                 plt.savefig(self.backup_folder+"web_rgb.png")
@@ -270,14 +303,44 @@ class ImageOptimizer:
 
 
                 plt.clf()
-                r_probs, g_probs, b_probs = self.generate_color_sampling_probs()
-                plt.plot(np.arange(0, 256), r_probs, color='r')
-                plt.plot(np.arange(0, 256), g_probs, color='g')
-                plt.plot(np.arange(0, 256), b_probs, color='b')
-                plt.ylim(ymin=0)
+                r_probs, g_probs, b_probs = self.generate_marginal_color_probs_binned()
+                plt.plot(np.arange(0, 32), r_probs, color='r')
+                plt.plot(np.arange(0, 32), g_probs, color='g')
+                plt.plot(np.arange(0, 32), b_probs, color='b')
                 plt.grid()
                 plt.savefig(self.backup_folder+self.project_name+"RGB_{}.png".format(i))
 
                 plt.imsave(self.backup_folder + self.project_name + "CENTER_{}.png".format(i), arr=self.generate_center_sampling_probs())
 
                 backup_updated = False
+
+
+
+            #3D RGB VIS
+            def vis(n_bins, color_probs):
+
+                fig = plt.figure(figsize=(8, 6))
+                ax = fig.add_subplot(111, projection='3d')
+
+                N = 4000
+                rs = np.random.randint(0, n_bins, N)
+                gs = np.random.randint(0, n_bins, N)
+                bs = np.random.randint(0, n_bins, N)
+                p = color_probs[rs, gs, bs]
+                p_norm = (p - np.min(p)) / np.max((p - np.min(p)))
+
+                colors = cm.viridis(p_norm)
+                colmap = cm.ScalarMappable(cmap=cm.viridis)
+                colmap.set_array(p_norm)
+
+                ax.scatter(xs=rs, ys=gs, zs=bs, c=colors, marker='o')
+                cb = fig.colorbar(colmap)
+
+                ax.set_xlabel('RED')
+                ax.set_ylabel('GREEN')
+                ax.set_zlabel('BLUE')
+
+                plt.show()
+
+            if i == 20000:
+                vis(self.n_color_bins, self.generate_color_sampling_probs_binned())
